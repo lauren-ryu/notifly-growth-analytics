@@ -13,6 +13,8 @@ Public-repository note
 - No Google Drive paths are included.
 - No private key map is created.
 - No files are written or downloaded by this script.
+- GA client/session identifiers remain only in memory because they are required
+  for downstream session matching; no row-level output is written by this file.
 
 Local prerequisites:
     pip install pandas numpy
@@ -54,10 +56,11 @@ if missing:
         "Missing required environment variables: " + ", ".join(missing)
     )
 
-# Set these locally to the period you want to analyze.
+# Actual project period. Change locally if needed.
 START_DATE_KST = "2026-06-17 00:00:00"
 END_DATE_KST = "2026-06-23 23:59:59"
 
+# Maximum allowed difference between form submission time and matching-log time.
 MATCH_TOLERANCE_SECONDS = 300
 
 
@@ -114,7 +117,10 @@ def parse_kst_datetime(series):
     """
     values = series.astype(str).str.strip()
 
-    has_z = values.str.contains("T", na=False) & values.str.contains("Z", na=False)
+    has_z = (
+        values.str.contains("T", na=False)
+        & values.str.contains("Z", na=False)
+    )
 
     out = pd.Series(
         pd.NaT,
@@ -124,12 +130,20 @@ def parse_kst_datetime(series):
 
     if has_z.any():
         out.loc[has_z] = (
-            pd.to_datetime(values.loc[has_z], errors="coerce", utc=True)
+            pd.to_datetime(
+                values.loc[has_z],
+                errors="coerce",
+                utc=True,
+            )
             .dt.tz_convert("Asia/Seoul")
         )
 
     if (~has_z).any():
-        parsed = pd.to_datetime(values.loc[~has_z], errors="coerce")
+        parsed = pd.to_datetime(
+            values.loc[~has_z],
+            errors="coerce",
+        )
+
         out.loc[~has_z] = parsed.dt.tz_localize(
             "Asia/Seoul",
             nonexistent="shift_forward",
@@ -212,10 +226,19 @@ lead2_rename = {
 }
 
 lead1 = lead1.rename(
-    columns={key: value for key, value in lead1_rename.items() if key in lead1.columns}
+    columns={
+        key: value
+        for key, value in lead1_rename.items()
+        if key in lead1.columns
+    }
 )
+
 lead2 = lead2.rename(
-    columns={key: value for key, value in lead2_rename.items() if key in lead2.columns}
+    columns={
+        key: value
+        for key, value in lead2_rename.items()
+        if key in lead2.columns
+    }
 )
 
 lead1 = coalesce_duplicate_columns(lead1)
@@ -229,8 +252,14 @@ lead2["form_name"] = "lead_form_2"
 lead2["expected_form_page"] = "/welcome"
 lead2["source_form_file"] = "lead_form_2_sheet"
 
-leads = pd.concat([lead1, lead2], ignore_index=True)
-leads["submitted_at_kst"] = parse_kst_datetime(leads["submitted_at"])
+leads = pd.concat(
+    [lead1, lead2],
+    ignore_index=True,
+)
+
+leads["submitted_at_kst"] = parse_kst_datetime(
+    leads["submitted_at"]
+)
 
 
 # ============================================================
@@ -248,15 +277,17 @@ required_log_cols = [
     "ga_session_id",
     "lead_id",
     "page_location",
-    "user_agent",
 ]
 
 for col in required_log_cols:
     if col not in logs.columns:
         logs[col] = np.nan
 
-logs["captured_at_kst"] = parse_kst_datetime(logs["captured_at"])
+logs["captured_at_kst"] = parse_kst_datetime(
+    logs["captured_at"]
+)
 
+# Remove rows that contain no useful matching keys.
 logs = logs[
     ~(
         logs["form_name"].isna()
@@ -280,8 +311,15 @@ for col in [
 # 5. Restrict to analysis period
 # ============================================================
 
-start_kst = pd.Timestamp(START_DATE_KST, tz="Asia/Seoul")
-end_kst = pd.Timestamp(END_DATE_KST, tz="Asia/Seoul")
+start_kst = pd.Timestamp(
+    START_DATE_KST,
+    tz="Asia/Seoul",
+)
+
+end_kst = pd.Timestamp(
+    END_DATE_KST,
+    tz="Asia/Seoul",
+)
 
 leads_period = leads[
     (leads["submitted_at_kst"] >= start_kst)
@@ -301,10 +339,18 @@ print("logs_period:", logs_period.shape)
 # 6. Match lead rows to logging rows by nearest time
 # ============================================================
 
-def match_leads_to_logs(leads_df, logs_df, tolerance_seconds=300):
+def match_leads_to_logs(
+    leads_df,
+    logs_df,
+    tolerance_seconds=300,
+):
     matched_parts = []
 
-    for form_name in sorted(leads_df["form_name"].dropna().unique()):
+    for form_name in sorted(
+        leads_df["form_name"]
+        .dropna()
+        .unique()
+    ):
         lead_part = leads_df[
             leads_df["form_name"] == form_name
         ].copy()
@@ -358,7 +404,9 @@ def match_leads_to_logs(leads_df, logs_df, tolerance_seconds=300):
             right_on="captured_at_kst",
             by="form_name",
             direction="nearest",
-            tolerance=pd.Timedelta(seconds=tolerance_seconds),
+            tolerance=pd.Timedelta(
+                seconds=tolerance_seconds
+            ),
             suffixes=("", "_log"),
         )
 
@@ -378,7 +426,10 @@ def match_leads_to_logs(leads_df, logs_df, tolerance_seconds=300):
     if not matched_parts:
         return pd.DataFrame()
 
-    return pd.concat(matched_parts, ignore_index=True)
+    return pd.concat(
+        matched_parts,
+        ignore_index=True,
+    )
 
 
 leads_matched = match_leads_to_logs(
@@ -388,11 +439,14 @@ leads_matched = match_leads_to_logs(
 )
 
 print("\nMatch status:")
-print(leads_matched["match_status"].value_counts(dropna=False))
+print(
+    leads_matched["match_status"]
+    .value_counts(dropna=False)
+)
 
 
 # ============================================================
-# 7. Create privacy-safe analytical dataframe
+# 7. Create privacy-safe working dataframe
 # ============================================================
 
 safe = leads_matched.copy()
@@ -406,7 +460,9 @@ for col in [
     "inquiry_purpose",
 ]:
     if col in safe.columns:
-        safe[col] = safe[col].apply(normalize_text)
+        safe[col] = safe[col].apply(
+            normalize_text
+        )
 
 safe["email_hash"] = (
     safe["email"].apply(hash_value)
@@ -450,9 +506,11 @@ if "inquiry_detail" in safe.columns:
         .astype(str)
         .str.len()
     )
+
     safe["has_inquiry_detail"] = (
         safe["inquiry_detail_length"] > 0
     )
+
 else:
     safe["inquiry_detail_length"] = 0
     safe["has_inquiry_detail"] = False
@@ -462,7 +520,7 @@ if "inquiry_purpose" not in safe.columns:
 
 
 # ============================================================
-# 8. Remove raw PII and unnecessary raw fields
+# 8. Remove raw PII
 # ============================================================
 
 pii_cols = [
@@ -481,10 +539,16 @@ pii_cols = [
 ]
 
 leads_matched_safe = safe.drop(
-    columns=[col for col in pii_cols if col in safe.columns],
+    columns=[
+        col
+        for col in pii_cols
+        if col in safe.columns
+    ],
     errors="ignore",
 )
 
+# These pseudonymous GA/log identifiers are retained only in memory because
+# downstream session matching requires them. This script does not export them.
 preferred_cols = [
     "lead_id",
     "form_name",
@@ -499,7 +563,8 @@ preferred_cols = [
     "page_location",
     "email_hash",
     "company_hash",
-    "email_domain",
+    "phone_hash",
+    "contact_name_hash",
     "privacy_consent_bool",
     "marketing_consent_bool",
     "newsletter_consent_bool",
@@ -531,17 +596,28 @@ leads_matched_safe = leads_matched_safe[
 # ============================================================
 
 lead_f1 = leads_matched_safe[
-    leads_matched_safe["form_name"] == "lead_form_1"
+    leads_matched_safe["form_name"]
+    == "lead_form_1"
 ].copy()
 
 lead_f2 = leads_matched_safe[
-    leads_matched_safe["form_name"] == "lead_form_2"
+    leads_matched_safe["form_name"]
+    == "lead_form_2"
 ].copy()
 
-lead_f1 = lead_f1.sort_values("submitted_at_kst")
-lead_f2 = lead_f2.sort_values("submitted_at_kst")
+lead_f1 = lead_f1.sort_values(
+    "submitted_at_kst"
+)
 
-# 1) Primary link: hashed email
+lead_f2 = lead_f2.sort_values(
+    "submitted_at_kst"
+)
+
+
+# ------------------------------------------------------------
+# 9-1. Primary link: hashed email
+# ------------------------------------------------------------
+
 journey_email = lead_f1.merge(
     lead_f2,
     on="email_hash",
@@ -561,24 +637,35 @@ journey_email["valid_f2_after_f1"] = (
 )
 
 journey_email = journey_email[
-    journey_email["valid_f2_after_f1"].fillna(False)
+    journey_email[
+        "valid_f2_after_f1"
+    ].fillna(False)
 ].copy()
 
 if not journey_email.empty:
     journey_email = (
         journey_email
         .sort_values(
-            ["lead_id_f1", "submitted_at_kst_f2"]
+            [
+                "lead_id_f1",
+                "submitted_at_kst_f2",
+            ]
         )
         .drop_duplicates(
             subset=["lead_id_f1"],
             keep="first",
         )
     )
-    journey_email["match_method"] = "email_hash"
+
+    journey_email["match_method"] = (
+        "email_hash"
+    )
 
 
-# 2) Secondary link: GA client ID
+# ------------------------------------------------------------
+# 9-2. Secondary link: GA client ID
+# ------------------------------------------------------------
+
 f1_ga = lead_f1.dropna(
     subset=["ga_client_id"]
 ).copy()
@@ -606,44 +693,64 @@ journey_ga["valid_f2_after_f1"] = (
 )
 
 journey_ga = journey_ga[
-    journey_ga["valid_f2_after_f1"].fillna(False)
+    journey_ga[
+        "valid_f2_after_f1"
+    ].fillna(False)
 ].copy()
 
 if not journey_ga.empty:
     journey_ga = (
         journey_ga
         .sort_values(
-            ["lead_id_f1", "submitted_at_kst_f2"]
+            [
+                "lead_id_f1",
+                "submitted_at_kst_f2",
+            ]
         )
         .drop_duplicates(
             subset=["lead_id_f1"],
             keep="first",
         )
     )
-    journey_ga["match_method"] = "ga_client_id"
+
+    journey_ga["match_method"] = (
+        "ga_client_id"
+    )
 
 
-# 3) Prefer email-hash match; use GA only when not already matched
+# ------------------------------------------------------------
+# 9-3. Prefer email-hash match; GA is a fallback
+# ------------------------------------------------------------
+
 if journey_email.empty and journey_ga.empty:
     lead_journey_safe = pd.DataFrame()
 
 else:
     email_matched_ids = (
-        set(journey_email["lead_id_f1"].dropna())
+        set(
+            journey_email[
+                "lead_id_f1"
+            ].dropna()
+        )
         if not journey_email.empty
         else set()
     )
 
     journey_ga_only = (
         journey_ga[
-            ~journey_ga["lead_id_f1"].isin(email_matched_ids)
+            ~journey_ga[
+                "lead_id_f1"
+            ].isin(email_matched_ids)
         ].copy()
         if not journey_ga.empty
         else pd.DataFrame()
     )
 
     lead_journey_safe = pd.concat(
-        [journey_email, journey_ga_only],
+        [
+            journey_email,
+            journey_ga_only,
+        ],
         ignore_index=True,
     )
 
@@ -674,7 +781,9 @@ else:
         if col in lead_journey_safe.columns
     ]
 
-    lead_journey_safe = lead_journey_safe[keep_cols]
+    lead_journey_safe = (
+        lead_journey_safe[keep_cols]
+    )
 
 
 # ============================================================
@@ -683,17 +792,30 @@ else:
 
 summary_by_form = (
     leads_matched_safe
-    .groupby("form_name", dropna=False)
+    .groupby(
+        "form_name",
+        dropna=False,
+    )
     .agg(
-        lead_count=("lead_id", "count"),
+        lead_count=(
+            "lead_id",
+            "count",
+        ),
         matched_count=(
             "match_status",
             lambda values: (
-                values == "matched_by_time_nearest"
+                values
+                == "matched_by_time_nearest"
             ).sum(),
         ),
-        unique_ga_clients=("ga_client_id", "nunique"),
-        unique_email_hash=("email_hash", "nunique"),
+        unique_ga_clients=(
+            "ga_client_id",
+            "nunique",
+        ),
+        unique_email_hash=(
+            "email_hash",
+            "nunique",
+        ),
     )
     .reset_index()
 )
@@ -707,15 +829,28 @@ print("\nLead matching summary:")
 print(summary_by_form)
 
 print("\nPrivacy-safe analytical columns:")
-print(leads_matched_safe.columns.tolist())
+print(
+    leads_matched_safe
+    .columns
+    .tolist()
+)
 
 if not lead_journey_safe.empty:
-    print("\nForm 1 -> Form 2 linked journeys:", len(lead_journey_safe))
     print(
-        lead_journey_safe["match_method"]
-        .value_counts(dropna=False)
+        "\nForm 1 -> Form 2 linked journeys:",
+        len(lead_journey_safe),
     )
+
+    print(
+        lead_journey_safe[
+            "match_method"
+        ].value_counts(dropna=False)
+    )
+
 else:
-    print("\nNo Form 1 -> Form 2 linked journey in the selected period.")
+    print(
+        "\nNo Form 1 -> Form 2 linked journey "
+        "in the selected period."
+    )
 
 # Nothing is written to disk in this public-repository version.
