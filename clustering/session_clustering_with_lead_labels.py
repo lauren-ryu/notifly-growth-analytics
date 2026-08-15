@@ -27,7 +27,6 @@ SESSION_FILE = Path("10_session_cluster_input.csv")
 LEAD_FILE = Path("leads_matched_safe.csv")
 
 MATCH_TOLERANCE_SEC = 300
-FORCE_K = 3
 RANDOM_STATE = 42
 
 
@@ -639,8 +638,11 @@ plt.show()
 # K-Means clustering
 # ---------------------------------------------------------------------
 
+# K=3 was selected after reviewing the diagnostics above.
+SELECTED_K = 3
+
 K = min(
-    max(FORCE_K, 2),
+    max(SELECTED_K, 2),
     n_samples - 1,
 )
 
