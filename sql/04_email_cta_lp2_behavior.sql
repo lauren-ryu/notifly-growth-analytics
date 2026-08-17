@@ -71,10 +71,7 @@ WITH base AS (
       )
     ) AS scroll_percent,
 
-    device.category AS device_category,
-    traffic_source.source AS first_user_source,
-    traffic_source.medium AS first_user_medium,
-    traffic_source.name AS first_user_campaign
+    device.category AS device_category
 
   FROM `project_id.analytics_property_id.events_*`
   WHERE _TABLE_SUFFIX BETWEEN start_date AND end_date
@@ -85,28 +82,25 @@ enriched AS (
     *,
     CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING)) AS session_key,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_source=([^&#]+)'),
-      first_user_source,
-      '(not set)'
-    ) AS source,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_source=([^&#]+)'
+    ) AS utm_source,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_medium=([^&#]+)'),
-      first_user_medium,
-      '(not set)'
-    ) AS medium,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_medium=([^&#]+)'
+    ) AS utm_medium,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_campaign=([^&#]+)'),
-      first_user_campaign,
-      '(not set)'
-    ) AS campaign,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_campaign=([^&#]+)'
+    ) AS utm_campaign,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_content=([^&#]+)'),
-      '(not set)'
-    ) AS content,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_content=([^&#]+)'
+    ) AS utm_content,
 
     COALESCE(
       page_group_param,
@@ -140,55 +134,102 @@ enriched AS (
     AND user_pseudo_id IS NOT NULL
 ),
 
-email_session AS (
+session_attribution AS (
   SELECT
-    event_date,
     session_key,
     user_pseudo_id,
 
-    ANY_VALUE(device_category) AS device_category,
+    ARRAY_AGG(
+      event_date
+      ORDER BY event_dt_kst
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS session_date,
 
-    ARRAY_AGG(source ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS source,
-    ARRAY_AGG(medium ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS medium,
-    ARRAY_AGG(campaign ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS campaign,
-    ARRAY_AGG(content ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS content,
+    ARRAY_AGG(
+      device_category
+      ORDER BY event_dt_kst
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS device_category,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_source IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(unattributed)'
+    ) AS source,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_medium IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(unattributed)'
+    ) AS medium,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_campaign IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(unattributed)'
+    ) AS campaign,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_content IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(not set)'
+    ) AS content
+
+  FROM enriched
+  GROUP BY
+    session_key,
+    user_pseudo_id
+),
+
+crm_sessions AS (
+  SELECT *
+  FROM session_attribution
+  WHERE LOWER(source) = 'kit'
+    AND LOWER(medium) = 'email'
+),
+
+lp2_behavior AS (
+  SELECT
+    e.session_key,
+    e.user_pseudo_id,
 
     ROUND(
-      SUM(IFNULL(engagement_time_msec, 0)) / 1000,
+      SUM(IFNULL(e.engagement_time_msec, 0)) / 1000,
       1
-    ) AS engagement_time_sec,
+    ) AS lp2_engagement_time_sec,
 
     MAX(
       IF(
-        event_name = 'scroll_depth',
-        scroll_percent,
+        e.event_name = 'scroll_depth',
+        e.scroll_percent,
         0
       )
-    ) AS max_scroll_percent,
+    ) AS lp2_max_scroll_percent,
 
     MAX(
       IF(
-        event_name = 'engagement_timer',
-        timer_seconds,
+        e.event_name = 'engagement_timer',
+        e.timer_seconds,
         0
       )
-    ) AS max_timer_seconds,
-
-    MAX(IF(page_group = 'lp2', 1, 0)) AS lp2_session,
+    ) AS lp2_max_timer_seconds,
 
     MAX(
       IF(
-        event_name = 'lead_submit'
-        AND form_stage = 'lead_2',
-        1,
-        0
-      )
-    ) AS lead2_submit,
-
-    MAX(
-      IF(
-        event_name = 'scroll_depth'
-        AND scroll_percent >= 30,
+        e.event_name = 'scroll_depth'
+        AND e.scroll_percent >= 30,
         1,
         0
       )
@@ -196,8 +237,8 @@ email_session AS (
 
     MAX(
       IF(
-        event_name = 'scroll_depth'
-        AND scroll_percent >= 50,
+        e.event_name = 'scroll_depth'
+        AND e.scroll_percent >= 50,
         1,
         0
       )
@@ -205,8 +246,8 @@ email_session AS (
 
     MAX(
       IF(
-        event_name = 'scroll_depth'
-        AND scroll_percent >= 90,
+        e.event_name = 'scroll_depth'
+        AND e.scroll_percent >= 90,
         1,
         0
       )
@@ -214,8 +255,8 @@ email_session AS (
 
     MAX(
       IF(
-        event_name = 'engagement_timer'
-        AND timer_seconds >= 10,
+        e.event_name = 'engagement_timer'
+        AND e.timer_seconds >= 10,
         1,
         0
       )
@@ -223,8 +264,8 @@ email_session AS (
 
     MAX(
       IF(
-        event_name = 'engagement_timer'
-        AND timer_seconds >= 20,
+        e.event_name = 'engagement_timer'
+        AND e.timer_seconds >= 20,
         1,
         0
       )
@@ -232,29 +273,74 @@ email_session AS (
 
     MAX(
       IF(
-        event_name = 'engagement_timer'
-        AND timer_seconds >= 40,
+        e.event_name = 'engagement_timer'
+        AND e.timer_seconds >= 40,
         1,
         0
       )
     ) AS timer_40
 
-  FROM enriched
+  FROM enriched e
+  INNER JOIN crm_sessions c
+    USING (session_key, user_pseudo_id)
+  WHERE e.page_group = 'lp2'
   GROUP BY
-    event_date,
-    session_key,
-    user_pseudo_id
+    e.session_key,
+    e.user_pseudo_id
 ),
 
-filtered AS (
-  SELECT *
-  FROM email_session
-  WHERE LOWER(source) = 'kit'
-    AND LOWER(medium) = 'email'
+session_outcomes AS (
+  SELECT
+    e.session_key,
+    e.user_pseudo_id,
+
+    MAX(
+      IF(
+        e.event_name = 'lead_submit'
+        AND e.form_stage = 'lead_2',
+        1,
+        0
+      )
+    ) AS lead2_submit
+
+  FROM enriched e
+  INNER JOIN crm_sessions c
+    USING (session_key, user_pseudo_id)
+  GROUP BY
+    e.session_key,
+    e.user_pseudo_id
+),
+
+crm_lp2 AS (
+  SELECT
+    c.session_date,
+    c.session_key,
+    c.user_pseudo_id,
+    c.campaign,
+    c.content,
+    c.device_category,
+
+    1 AS lp2_session,
+    b.lp2_engagement_time_sec,
+    b.lp2_max_scroll_percent,
+    b.lp2_max_timer_seconds,
+    b.scroll_30,
+    b.scroll_50,
+    b.scroll_90,
+    b.timer_10,
+    b.timer_20,
+    b.timer_40,
+    COALESCE(o.lead2_submit, 0) AS lead2_submit
+
+  FROM crm_sessions c
+  INNER JOIN lp2_behavior b
+    USING (session_key, user_pseudo_id)
+  LEFT JOIN session_outcomes o
+    USING (session_key, user_pseudo_id)
 )
 
 SELECT
-  event_date,
+  session_date AS event_date,
   campaign AS email_type,
   content AS email_cta_position,
   device_category,
@@ -265,13 +351,13 @@ SELECT
   SUM(lp2_session) AS lp2_sessions,
   SUM(lead2_submit) AS lead2_submit_sessions,
 
-  ROUND(AVG(engagement_time_sec), 1) AS avg_engagement_time_sec,
-  ROUND(AVG(max_scroll_percent), 1) AS avg_max_scroll_percent,
-  ROUND(AVG(max_timer_seconds), 1) AS avg_max_timer_seconds,
+  ROUND(AVG(lp2_engagement_time_sec), 1) AS avg_lp2_engagement_time_sec,
+  ROUND(AVG(lp2_max_scroll_percent), 1) AS avg_lp2_max_scroll_percent,
+  ROUND(AVG(lp2_max_timer_seconds), 1) AS avg_lp2_max_timer_seconds,
 
   SAFE_DIVIDE(
     SUM(lead2_submit),
-    NULLIF(SUM(lp2_session), 0)
+    COUNT(DISTINCT session_key)
   ) AS lp2_to_lead2_rate,
 
   SAFE_DIVIDE(
@@ -304,7 +390,7 @@ SELECT
     COUNT(DISTINCT session_key)
   ) AS timer_40_rate
 
-FROM filtered
+FROM crm_lp2
 GROUP BY
   event_date,
   email_type,
