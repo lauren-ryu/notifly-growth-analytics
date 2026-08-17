@@ -1,5 +1,5 @@
 -- Notifly landing engagement depth
--- Compares page-level engagement, CTA location, and lead outcomes across landing pages.
+-- Compares landing-page engagement, CTA location, and stage-relevant lead outcomes.
 
 DECLARE start_date STRING DEFAULT '20260617';
 DECLARE end_date STRING DEFAULT '20260623';
@@ -83,10 +83,7 @@ WITH base AS (
       )
     ) AS scroll_percent,
 
-    device.category AS device_category,
-    traffic_source.source AS first_user_source,
-    traffic_source.medium AS first_user_medium,
-    traffic_source.name AS first_user_campaign
+    device.category AS device_category
 
   FROM `project_id.analytics_property_id.events_*`
   WHERE _TABLE_SUFFIX BETWEEN start_date AND end_date
@@ -127,47 +124,31 @@ enriched AS (
         ) = '/thankyou2' THEN 'thankyou2'
         ELSE 'other'
       END
-    ) AS page_group,
-
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_source=([^&#]+)'),
-      first_user_source,
-      '(not set)'
-    ) AS source,
-
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_medium=([^&#]+)'),
-      first_user_medium,
-      '(not set)'
-    ) AS medium,
-
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_campaign=([^&#]+)'),
-      first_user_campaign,
-      '(not set)'
-    ) AS campaign,
-
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_content=([^&#]+)'),
-      '(not set)'
-    ) AS content
+    ) AS page_group
 
   FROM base
   WHERE ga_session_id IS NOT NULL
+    AND user_pseudo_id IS NOT NULL
 ),
 
-page_session AS (
+landing_page_session AS (
   SELECT
-    event_date,
-    page_group,
-    page_path,
-    source,
-    medium,
-    campaign,
-    content,
-    device_category,
     session_key,
     user_pseudo_id,
+    page_group,
+    page_path,
+
+    ARRAY_AGG(
+      event_date
+      ORDER BY event_dt_kst
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS page_session_date,
+
+    ARRAY_AGG(
+      device_category
+      ORDER BY event_dt_kst
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS device_category,
 
     COUNT(*) AS events_on_page,
     COUNTIF(event_name = 'page_view') AS page_views,
@@ -214,24 +195,6 @@ page_session AS (
       event_name = 'cta_click'
       AND cta_name = 'mobile_cta'
     ) AS mobile_cta_click_events,
-
-    MAX(
-      IF(
-        event_name = 'lead_submit'
-        AND form_stage = 'lead_1',
-        1,
-        0
-      )
-    ) AS lead1_submit,
-
-    MAX(
-      IF(
-        event_name = 'lead_submit'
-        AND form_stage = 'lead_2',
-        1,
-        0
-      )
-    ) AS lead2_submit,
 
     MAX(IF(
       event_name = 'scroll_depth' AND scroll_percent >= 10,
@@ -324,27 +287,64 @@ page_session AS (
     )) AS timer_60
 
   FROM enriched
+  WHERE page_group IN ('lp1', 'lp2')
   GROUP BY
-    event_date,
+    session_key,
+    user_pseudo_id,
     page_group,
-    page_path,
-    source,
-    medium,
-    campaign,
-    content,
-    device_category,
+    page_path
+),
+
+session_outcomes AS (
+  SELECT
+    session_key,
+    user_pseudo_id,
+
+    MAX(
+      IF(
+        event_name = 'lead_submit'
+        AND form_stage = 'lead_1',
+        1,
+        0
+      )
+    ) AS lead1_submit,
+
+    MAX(
+      IF(
+        event_name = 'lead_submit'
+        AND form_stage = 'lead_2',
+        1,
+        0
+      )
+    ) AS lead2_submit
+
+  FROM enriched
+  GROUP BY
     session_key,
     user_pseudo_id
+),
+
+landing_with_outcomes AS (
+  SELECT
+    l.*,
+    o.lead1_submit,
+    o.lead2_submit,
+
+    CASE
+      WHEN l.page_group = 'lp1' THEN o.lead1_submit
+      WHEN l.page_group = 'lp2' THEN o.lead2_submit
+      ELSE 0
+    END AS relevant_lead_submit
+
+  FROM landing_page_session l
+  LEFT JOIN session_outcomes o
+    USING (session_key, user_pseudo_id)
 )
 
 SELECT
-  event_date,
+  page_session_date AS event_date,
   page_group,
   page_path,
-  source,
-  medium,
-  campaign,
-  content,
   device_category,
 
   COUNT(DISTINCT user_pseudo_id) AS users,
@@ -363,8 +363,7 @@ SELECT
   SUM(footer_cta_click_events) AS footer_cta_click_events,
   SUM(mobile_cta_click_events) AS mobile_cta_click_events,
 
-  SUM(lead1_submit) AS lead1_submit_sessions,
-  SUM(lead2_submit) AS lead2_submit_sessions,
+  SUM(relevant_lead_submit) AS relevant_lead_submit_sessions,
 
   SAFE_DIVIDE(
     SUM(cta_clicked),
@@ -372,9 +371,9 @@ SELECT
   ) AS page_to_cta_rate,
 
   SAFE_DIVIDE(
-    SUM(lead1_submit) + SUM(lead2_submit),
+    SUM(relevant_lead_submit),
     COUNT(DISTINCT session_key)
-  ) AS page_to_lead_submit_rate,
+  ) AS page_to_relevant_lead_rate,
 
   SAFE_DIVIDE(SUM(scroll_10), COUNT(DISTINCT session_key)) AS scroll_10_rate,
   SAFE_DIVIDE(SUM(scroll_20), COUNT(DISTINCT session_key)) AS scroll_20_rate,
@@ -393,15 +392,11 @@ SELECT
   SAFE_DIVIDE(SUM(timer_40), COUNT(DISTINCT session_key)) AS timer_40_rate,
   SAFE_DIVIDE(SUM(timer_60), COUNT(DISTINCT session_key)) AS timer_60_rate
 
-FROM page_session
+FROM landing_with_outcomes
 GROUP BY
   event_date,
   page_group,
   page_path,
-  source,
-  medium,
-  campaign,
-  content,
   device_category
 ORDER BY
   event_date,
