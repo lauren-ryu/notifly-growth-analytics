@@ -1,5 +1,6 @@
 -- Notifly landing engagement depth
--- Compares landing-page engagement, CTA location, and stage-relevant lead outcomes.
+-- Activation | Landing engagement depth
+-- Compares LP1 and LP2 engagement depth and CTA behavior, linking LP1 to Lead1 and LP2 to Lead2.
 
 DECLARE start_date STRING DEFAULT '20260617';
 DECLARE end_date STRING DEFAULT '20260623';
