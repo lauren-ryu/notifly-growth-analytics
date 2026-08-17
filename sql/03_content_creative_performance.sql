@@ -1,5 +1,5 @@
 -- Notifly content and creative performance
--- Compares session behavior, CTA location, and lead outcomes by content variant.
+-- Compares Meta and community session behavior, CTA location, and Lead1 outcomes.
 
 DECLARE start_date STRING DEFAULT '20260617';
 DECLARE end_date STRING DEFAULT '20260623';
@@ -113,13 +113,19 @@ enriched AS (
 
   FROM base
   WHERE ga_session_id IS NOT NULL
+    AND user_pseudo_id IS NOT NULL
 ),
 
 session_flags AS (
   SELECT
-    event_date,
     session_key,
     user_pseudo_id,
+
+    ARRAY_AGG(
+      event_date
+      ORDER BY event_dt_kst
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS session_date,
 
     ANY_VALUE(device_category) AS device_category,
 
@@ -136,7 +142,6 @@ session_flags AS (
     ) AS engagement_time_sec,
 
     MAX(IF(page_group = 'lp1', 1, 0)) AS lp1_session,
-    MAX(IF(page_group = 'lp2', 1, 0)) AS lp2_session,
 
     MAX(IF(event_name = 'cta_click', 1, 0)) AS cta_clicked,
 
@@ -169,20 +174,10 @@ session_flags AS (
         1,
         0
       )
-    ) AS lead1_submit,
-
-    MAX(
-      IF(
-        event_name = 'lead_submit'
-        AND form_stage = 'lead_2',
-        1,
-        0
-      )
-    ) AS lead2_submit
+    ) AS lead1_submit
 
   FROM enriched
   GROUP BY
-    event_date,
     session_key,
     user_pseudo_id
 ),
@@ -196,23 +191,26 @@ labeled AS (
         THEN CONCAT('meta_', campaign, '_', content)
       WHEN LOWER(medium) = 'community'
         THEN CONCAT('community_', source, '_', campaign)
-      WHEN LOWER(source) = 'kit'
-        THEN CONCAT('email_', campaign, '_', content)
-      ELSE CONCAT(source, '_', medium, '_', campaign, '_', content)
+      ELSE NULL
     END AS creative_group,
 
     CASE
       WHEN LOWER(source) = 'meta' THEN 'meta_ad'
       WHEN LOWER(medium) = 'community' THEN 'community_content'
-      WHEN LOWER(source) = 'kit' THEN 'crm_email'
-      ELSE 'other'
+      ELSE NULL
     END AS content_type
 
   FROM session_flags
+),
+
+filtered AS (
+  SELECT *
+  FROM labeled
+  WHERE content_type IS NOT NULL
 )
 
 SELECT
-  event_date,
+  session_date AS event_date,
   content_type,
   creative_group,
   source,
@@ -229,7 +227,6 @@ SELECT
   ROUND(AVG(engagement_time_sec), 1) AS avg_engagement_time_sec,
 
   SUM(lp1_session) AS lp1_sessions,
-  SUM(lp2_session) AS lp2_sessions,
 
   SUM(cta_clicked) AS cta_clicked_sessions,
   SUM(total_cta_click_events) AS total_cta_click_events,
@@ -239,7 +236,6 @@ SELECT
   SUM(mobile_cta_click_events) AS mobile_cta_click_events,
 
   SUM(lead1_submit) AS lead1_submit_sessions,
-  SUM(lead2_submit) AS lead2_submit_sessions,
 
   SAFE_DIVIDE(
     SUM(cta_clicked),
@@ -249,14 +245,9 @@ SELECT
   SAFE_DIVIDE(
     SUM(lead1_submit),
     COUNT(DISTINCT session_key)
-  ) AS session_to_lead1_rate,
+  ) AS session_to_lead1_rate
 
-  SAFE_DIVIDE(
-    SUM(lead2_submit),
-    COUNT(DISTINCT session_key)
-  ) AS session_to_lead2_rate
-
-FROM labeled
+FROM filtered
 GROUP BY
   event_date,
   content_type,
