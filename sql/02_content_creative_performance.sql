@@ -47,10 +47,7 @@ WITH base AS (
       WHERE ep.key = 'engagement_time_msec'
     ) AS engagement_time_msec,
 
-    device.category AS device_category,
-    traffic_source.source AS first_user_source,
-    traffic_source.medium AS first_user_medium,
-    traffic_source.name AS first_user_campaign
+    device.category AS device_category
 
   FROM `project_id.analytics_property_id.events_*`
   WHERE _TABLE_SUFFIX BETWEEN start_date AND end_date
@@ -61,28 +58,25 @@ enriched AS (
     *,
     CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING)) AS session_key,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_source=([^&#]+)'),
-      first_user_source,
-      '(not set)'
-    ) AS source,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_source=([^&#]+)'
+    ) AS utm_source,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_medium=([^&#]+)'),
-      first_user_medium,
-      '(not set)'
-    ) AS medium,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_medium=([^&#]+)'
+    ) AS utm_medium,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_campaign=([^&#]+)'),
-      first_user_campaign,
-      '(not set)'
-    ) AS campaign,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_campaign=([^&#]+)'
+    ) AS utm_campaign,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_content=([^&#]+)'),
-      '(not set)'
-    ) AS content,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_content=([^&#]+)'
+    ) AS utm_content,
 
     COALESCE(
       page_group_param,
@@ -127,12 +121,47 @@ session_flags AS (
       LIMIT 1
     )[SAFE_OFFSET(0)] AS session_date,
 
-    ANY_VALUE(device_category) AS device_category,
+    ARRAY_AGG(
+      device_category
+      ORDER BY event_dt_kst
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS device_category,
 
-    ARRAY_AGG(source ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS source,
-    ARRAY_AGG(medium ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS medium,
-    ARRAY_AGG(campaign ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS campaign,
-    ARRAY_AGG(content ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS content,
+    COALESCE(
+      ARRAY_AGG(
+        utm_source IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(unattributed)'
+    ) AS source,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_medium IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(unattributed)'
+    ) AS medium,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_campaign IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(unattributed)'
+    ) AS campaign,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_content IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(not set)'
+    ) AS content,
 
     COUNT(*) AS total_events,
 
@@ -198,7 +227,12 @@ labeled AS (
       WHEN LOWER(source) = 'meta' THEN 'meta_ad'
       WHEN LOWER(medium) = 'community' THEN 'community_content'
       ELSE NULL
-    END AS content_type
+    END AS content_type,
+
+    CASE
+      WHEN LOWER(medium) = 'community' THEN '(not used)'
+      ELSE content
+    END AS analysis_content
 
   FROM session_flags
 ),
@@ -216,7 +250,7 @@ SELECT
   source,
   medium,
   campaign,
-  content,
+  analysis_content AS content,
   device_category,
 
   COUNT(DISTINCT user_pseudo_id) AS users,
