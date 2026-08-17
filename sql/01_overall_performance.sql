@@ -6,12 +6,7 @@ DECLARE end_date STRING DEFAULT '20260623';
 
 WITH event_detail AS (
   SELECT
-    PARSE_DATE('%Y%m%d', event_date) AS event_date,
-    FORMAT_DATE('%A', PARSE_DATE('%Y%m%d', event_date)) AS day_of_week,
     DATETIME(TIMESTAMP_MICROS(event_timestamp), 'Asia/Seoul') AS event_dt_kst,
-    EXTRACT(
-      HOUR FROM DATETIME(TIMESTAMP_MICROS(event_timestamp), 'Asia/Seoul')
-    ) AS hour_kst,
     user_pseudo_id,
     event_name,
 
@@ -32,12 +27,6 @@ WITH event_detail AS (
       FROM UNNEST(event_params) ep
       WHERE ep.key = 'page_group'
     ) AS page_group_param,
-
-    (
-      SELECT ep.value.string_value
-      FROM UNNEST(event_params) ep
-      WHERE ep.key = 'page_path'
-    ) AS page_path_param,
 
     COALESCE(
       (
@@ -83,10 +72,7 @@ WITH event_detail AS (
 
     device.category AS device_category,
     device.operating_system AS operating_system,
-    device.web_info.browser AS browser,
-    traffic_source.source AS first_user_source,
-    traffic_source.medium AS first_user_medium,
-    traffic_source.name AS first_user_campaign
+    device.web_info.browser AS browser
 
   FROM `project_id.analytics_property_id.events_*`
   WHERE _TABLE_SUFFIX BETWEEN start_date AND end_date
@@ -96,11 +82,6 @@ enriched AS (
   SELECT
     *,
     CONCAT(user_pseudo_id, '-', CAST(ga_session_id AS STRING)) AS session_key,
-
-    COALESCE(
-      page_path_param,
-      REGEXP_EXTRACT(page_location, r'https?://[^/]+([^?#]*)')
-    ) AS page_path,
 
     COALESCE(
       page_group_param,
@@ -129,37 +110,33 @@ enriched AS (
       END
     ) AS page_group,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_source=([^&#]+)'),
-      first_user_source,
-      '(not set)'
-    ) AS source,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_source=([^&#]+)'
+    ) AS utm_source,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_medium=([^&#]+)'),
-      first_user_medium,
-      '(not set)'
-    ) AS medium,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_medium=([^&#]+)'
+    ) AS utm_medium,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_campaign=([^&#]+)'),
-      first_user_campaign,
-      '(not set)'
-    ) AS campaign,
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_campaign=([^&#]+)'
+    ) AS utm_campaign,
 
-    COALESCE(
-      REGEXP_EXTRACT(page_location, r'[?&]utm_content=([^&#]+)'),
-      '(not set)'
-    ) AS content
+    REGEXP_EXTRACT(
+      page_location,
+      r'[?&]utm_content=([^&#]+)'
+    ) AS utm_content
 
   FROM event_detail
   WHERE ga_session_id IS NOT NULL
+    AND user_pseudo_id IS NOT NULL
 ),
 
-session_flags AS (
+session_core AS (
   SELECT
-    event_date,
-    day_of_week,
     session_key,
     user_pseudo_id,
 
@@ -171,15 +148,59 @@ session_flags AS (
       SECOND
     ) AS session_duration_sec,
 
-    ANY_VALUE(hour_kst) AS hour_kst,
-    ANY_VALUE(device_category) AS device_category,
-    ANY_VALUE(operating_system) AS operating_system,
-    ANY_VALUE(browser) AS browser,
+    ARRAY_AGG(
+      device_category
+      ORDER BY event_dt_kst
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS device_category,
 
-    ARRAY_AGG(source ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS source,
-    ARRAY_AGG(medium ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS medium,
-    ARRAY_AGG(campaign ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS campaign,
-    ARRAY_AGG(content ORDER BY event_dt_kst LIMIT 1)[SAFE_OFFSET(0)] AS content,
+    ARRAY_AGG(
+      operating_system
+      ORDER BY event_dt_kst
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS operating_system,
+
+    ARRAY_AGG(
+      browser
+      ORDER BY event_dt_kst
+      LIMIT 1
+    )[SAFE_OFFSET(0)] AS browser,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_source IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(unattributed)'
+    ) AS source,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_medium IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(unattributed)'
+    ) AS medium,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_campaign IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(unattributed)'
+    ) AS campaign,
+
+    COALESCE(
+      ARRAY_AGG(
+        utm_content IGNORE NULLS
+        ORDER BY event_dt_kst
+        LIMIT 1
+      )[SAFE_OFFSET(0)],
+      '(not set)'
+    ) AS content,
 
     COUNT(*) AS total_events,
     COUNTIF(event_name = 'page_view') AS page_views,
@@ -191,8 +212,6 @@ session_flags AS (
 
     MAX(IF(page_group = 'lp1', 1, 0)) AS lp1_session,
     MAX(IF(page_group = 'lp2', 1, 0)) AS lp2_session,
-    MAX(IF(page_group = 'thankyou1', 1, 0)) AS thankyou1_session,
-    MAX(IF(page_group = 'thankyou2', 1, 0)) AS thankyou2_session,
 
     MAX(IF(event_name = 'cta_click', 1, 0)) AS cta_clicked,
     COUNTIF(event_name = 'cta_click') AS cta_click_events,
@@ -231,108 +250,42 @@ session_flags AS (
       )
     ) AS max_timer_seconds,
 
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 10,
-      1,
-      0
-    )) AS scroll_10,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 10, 1, 0)) AS scroll_10,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 20, 1, 0)) AS scroll_20,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 30, 1, 0)) AS scroll_30,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 40, 1, 0)) AS scroll_40,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 50, 1, 0)) AS scroll_50,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 60, 1, 0)) AS scroll_60,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 70, 1, 0)) AS scroll_70,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 80, 1, 0)) AS scroll_80,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 90, 1, 0)) AS scroll_90,
+    MAX(IF(event_name = 'scroll_depth' AND scroll_percent >= 99, 1, 0)) AS scroll_99,
 
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 20,
-      1,
-      0
-    )) AS scroll_20,
-
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 30,
-      1,
-      0
-    )) AS scroll_30,
-
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 40,
-      1,
-      0
-    )) AS scroll_40,
-
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 50,
-      1,
-      0
-    )) AS scroll_50,
-
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 60,
-      1,
-      0
-    )) AS scroll_60,
-
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 70,
-      1,
-      0
-    )) AS scroll_70,
-
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 80,
-      1,
-      0
-    )) AS scroll_80,
-
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 90,
-      1,
-      0
-    )) AS scroll_90,
-
-    MAX(IF(
-      event_name = 'scroll_depth' AND scroll_percent >= 99,
-      1,
-      0
-    )) AS scroll_99,
-
-    MAX(IF(
-      event_name = 'engagement_timer' AND timer_seconds >= 5,
-      1,
-      0
-    )) AS timer_5,
-
-    MAX(IF(
-      event_name = 'engagement_timer' AND timer_seconds >= 10,
-      1,
-      0
-    )) AS timer_10,
-
-    MAX(IF(
-      event_name = 'engagement_timer' AND timer_seconds >= 20,
-      1,
-      0
-    )) AS timer_20,
-
-    MAX(IF(
-      event_name = 'engagement_timer' AND timer_seconds >= 40,
-      1,
-      0
-    )) AS timer_40,
-
-    MAX(IF(
-      event_name = 'engagement_timer' AND timer_seconds >= 60,
-      1,
-      0
-    )) AS timer_60
+    MAX(IF(event_name = 'engagement_timer' AND timer_seconds >= 5, 1, 0)) AS timer_5,
+    MAX(IF(event_name = 'engagement_timer' AND timer_seconds >= 10, 1, 0)) AS timer_10,
+    MAX(IF(event_name = 'engagement_timer' AND timer_seconds >= 20, 1, 0)) AS timer_20,
+    MAX(IF(event_name = 'engagement_timer' AND timer_seconds >= 40, 1, 0)) AS timer_40,
+    MAX(IF(event_name = 'engagement_timer' AND timer_seconds >= 60, 1, 0)) AS timer_60
 
   FROM enriched
   GROUP BY
-    event_date,
-    day_of_week,
     session_key,
     user_pseudo_id
+),
+
+session_flags AS (
+  SELECT
+    *,
+    DATE(session_start_kst) AS session_date,
+    FORMAT_DATE('%A', DATE(session_start_kst)) AS day_of_week,
+    EXTRACT(HOUR FROM session_start_kst) AS hour_kst
+  FROM session_core
 ),
 
 segments AS (
   SELECT 'overall' AS segment_type, 'all' AS segment_value, * FROM session_flags
   UNION ALL
-  SELECT 'date', CAST(event_date AS STRING), * FROM session_flags
+  SELECT 'date', CAST(session_date AS STRING), * FROM session_flags
   UNION ALL
   SELECT 'day_of_week', day_of_week, * FROM session_flags
   UNION ALL
@@ -370,14 +323,11 @@ SELECT
   ROUND(AVG(page_views), 2) AS avg_page_views_per_session,
 
   ROUND(AVG(session_duration_sec), 1) AS avg_session_duration_sec,
-  APPROX_QUANTILES(session_duration_sec, 4)[OFFSET(2)]
-    AS median_session_duration_sec,
+  APPROX_QUANTILES(session_duration_sec, 4)[OFFSET(2)] AS median_session_duration_sec,
   ROUND(AVG(engagement_time_sec), 1) AS avg_engagement_time_sec,
 
   SUM(lp1_session) AS lp1_sessions,
   SUM(lp2_session) AS lp2_sessions,
-  SUM(thankyou1_session) AS thankyou1_sessions,
-  SUM(thankyou2_session) AS thankyou2_sessions,
 
   SUM(cta_clicked) AS cta_clicked_sessions,
   SUM(cta_click_events) AS cta_click_events,
