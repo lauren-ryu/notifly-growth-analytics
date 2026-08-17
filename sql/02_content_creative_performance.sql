@@ -1,5 +1,5 @@
 -- Notifly content and creative performance
--- Compares Meta and community session behavior, CTA location, and Lead1 outcomes.
+-- Compares Meta and community acquisition sessions by creative group, LP1 intent, and Lead1 outcome.
 
 DECLARE start_date STRING DEFAULT '20260617';
 DECLARE end_date STRING DEFAULT '20260623';
@@ -32,20 +32,8 @@ WITH base AS (
     (
       SELECT ep.value.string_value
       FROM UNNEST(event_params) ep
-      WHERE ep.key = 'cta_name'
-    ) AS cta_name,
-
-    (
-      SELECT ep.value.string_value
-      FROM UNNEST(event_params) ep
       WHERE ep.key = 'form_stage'
     ) AS form_stage,
-
-    (
-      SELECT ep.value.int_value
-      FROM UNNEST(event_params) ep
-      WHERE ep.key = 'engagement_time_msec'
-    ) AS engagement_time_msec,
 
     device.category AS device_category
 
@@ -110,7 +98,7 @@ enriched AS (
     AND user_pseudo_id IS NOT NULL
 ),
 
-session_flags AS (
+session_attribution AS (
   SELECT
     session_key,
     user_pseudo_id,
@@ -161,49 +149,7 @@ session_flags AS (
         LIMIT 1
       )[SAFE_OFFSET(0)],
       '(not set)'
-    ) AS content,
-
-    COUNT(*) AS total_events,
-
-    ROUND(
-      SUM(IFNULL(engagement_time_msec, 0)) / 1000,
-      1
-    ) AS engagement_time_sec,
-
-    MAX(IF(page_group = 'lp1', 1, 0)) AS lp1_session,
-
-    MAX(IF(event_name = 'cta_click', 1, 0)) AS cta_clicked,
-
-    COUNTIF(
-      event_name = 'cta_click'
-      AND cta_name = 'nav_cta'
-    ) AS nav_cta_click_events,
-
-    COUNTIF(
-      event_name = 'cta_click'
-      AND cta_name = 'hero_cta'
-    ) AS hero_cta_click_events,
-
-    COUNTIF(
-      event_name = 'cta_click'
-      AND cta_name = 'footer_cta'
-    ) AS footer_cta_click_events,
-
-    COUNTIF(
-      event_name = 'cta_click'
-      AND cta_name = 'mobile_cta'
-    ) AS mobile_cta_click_events,
-
-    COUNTIF(event_name = 'cta_click') AS total_cta_click_events,
-
-    MAX(
-      IF(
-        event_name = 'lead_submit'
-        AND form_stage = 'lead_1',
-        1,
-        0
-      )
-    ) AS lead1_submit
+    ) AS content
 
   FROM enriched
   GROUP BY
@@ -211,7 +157,7 @@ session_flags AS (
     user_pseudo_id
 ),
 
-labeled AS (
+acquisition_sessions AS (
   SELECT
     *,
 
@@ -234,13 +180,79 @@ labeled AS (
       ELSE content
     END AS analysis_content
 
-  FROM session_flags
+  FROM session_attribution
+  WHERE LOWER(source) = 'meta'
+     OR LOWER(medium) = 'community'
 ),
 
-filtered AS (
-  SELECT *
-  FROM labeled
-  WHERE content_type IS NOT NULL
+lp1_intent AS (
+  SELECT
+    e.session_key,
+    e.user_pseudo_id,
+
+    1 AS lp1_session,
+
+    MAX(
+      IF(
+        e.event_name = 'cta_click',
+        1,
+        0
+      )
+    ) AS cta_clicked
+
+  FROM enriched e
+  INNER JOIN acquisition_sessions a
+    USING (session_key, user_pseudo_id)
+  WHERE e.page_group = 'lp1'
+  GROUP BY
+    e.session_key,
+    e.user_pseudo_id
+),
+
+session_outcomes AS (
+  SELECT
+    e.session_key,
+    e.user_pseudo_id,
+
+    MAX(
+      IF(
+        e.event_name = 'lead_submit'
+        AND e.form_stage = 'lead_1',
+        1,
+        0
+      )
+    ) AS lead1_submit
+
+  FROM enriched e
+  INNER JOIN acquisition_sessions a
+    USING (session_key, user_pseudo_id)
+  GROUP BY
+    e.session_key,
+    e.user_pseudo_id
+),
+
+creative_performance AS (
+  SELECT
+    a.session_date,
+    a.session_key,
+    a.user_pseudo_id,
+    a.content_type,
+    a.creative_group,
+    a.source,
+    a.medium,
+    a.campaign,
+    a.analysis_content,
+    a.device_category,
+
+    COALESCE(i.lp1_session, 0) AS lp1_session,
+    COALESCE(i.cta_clicked, 0) AS cta_clicked,
+    COALESCE(o.lead1_submit, 0) AS lead1_submit
+
+  FROM acquisition_sessions a
+  LEFT JOIN lp1_intent i
+    USING (session_key, user_pseudo_id)
+  LEFT JOIN session_outcomes o
+    USING (session_key, user_pseudo_id)
 )
 
 SELECT
@@ -256,32 +268,21 @@ SELECT
   COUNT(DISTINCT user_pseudo_id) AS users,
   COUNT(DISTINCT session_key) AS sessions,
 
-  SUM(total_events) AS total_events,
-  ROUND(AVG(total_events), 1) AS avg_events_per_session,
-  ROUND(AVG(engagement_time_sec), 1) AS avg_engagement_time_sec,
-
   SUM(lp1_session) AS lp1_sessions,
-
   SUM(cta_clicked) AS cta_clicked_sessions,
-  SUM(total_cta_click_events) AS total_cta_click_events,
-  SUM(nav_cta_click_events) AS nav_cta_click_events,
-  SUM(hero_cta_click_events) AS hero_cta_click_events,
-  SUM(footer_cta_click_events) AS footer_cta_click_events,
-  SUM(mobile_cta_click_events) AS mobile_cta_click_events,
-
   SUM(lead1_submit) AS lead1_submit_sessions,
 
   SAFE_DIVIDE(
     SUM(cta_clicked),
-    COUNT(DISTINCT session_key)
-  ) AS session_to_cta_rate,
+    NULLIF(SUM(lp1_session), 0)
+  ) AS lp1_to_cta_rate,
 
   SAFE_DIVIDE(
     SUM(lead1_submit),
-    COUNT(DISTINCT session_key)
-  ) AS session_to_lead1_rate
+    NULLIF(SUM(lp1_session), 0)
+  ) AS lp1_to_lead1_rate
 
-FROM filtered
+FROM creative_performance
 GROUP BY
   event_date,
   content_type,
