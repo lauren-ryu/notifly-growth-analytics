@@ -1,5 +1,6 @@
 -- Notifly content and creative performance
--- Compares Meta and community acquisition sessions by creative group, LP1 intent, and Lead1 outcome.
+-- Acquisition | Content and creative performance
+-- Compares Meta and community acquisition from LP1 entry to CTA intent and Lead1 outcome.
 
 DECLARE start_date STRING DEFAULT '20260617';
 DECLARE end_date STRING DEFAULT '20260623';
