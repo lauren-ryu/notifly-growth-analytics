@@ -1,5 +1,6 @@
 -- Notifly email CTA and LP2 behavior
--- Compares CRM email re-entry sessions by email campaign, email CTA position, and device.
+-- CRM re-entry | Email CTA and LP2 behavior
+-- Compares email-driven LP2 engagement and Lead2 outcome by email campaign and CTA position.
 
 DECLARE start_date STRING DEFAULT '20260617';
 DECLARE end_date STRING DEFAULT '20260623';
