@@ -133,7 +133,7 @@ SELECT
   SAFE_DIVIDE(
     SUM(lead1_submit),
     NULLIF(SUM(cta_clicked), 0)
-  ) AS cta_to_lead1_rate,
+  ) AS cta_to_lead1_volume_ratio,
 
   SAFE_DIVIDE(
     COUNT(DISTINCT IF(lp2_session = 1, user_pseudo_id, NULL)),
